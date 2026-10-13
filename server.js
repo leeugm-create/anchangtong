@@ -19,21 +19,34 @@ const BACKUP_DIR = path.join(ROOT, 'backups');
 const POOL_DAYS = 15; // 15 天未跟进流入公池
 
 // ---------- 一键更新 ----------
+// 原理：用 GitHub API 取 main 最新 commit SHA，文件按 SHA pin 住从 jsdelivr 下
+// （SHA pin 的地址永不过期，不会被 CDN 缓存坑）
 const BUNDLED_VERSION = '20261013.2'; // 发版时同步改 version.json
-const UPDATE_BASE = process.env.ACT_UPDATE_BASE || 'https://cdn.jsdelivr.net/gh/leeugm-create/anchangtong@main';
+const UPDATE_REPO = 'leeugm-create/anchangtong';
 const UPDATE_FILES = ['server.js', 'public/index.html', 'public/styles.css', 'public/app.js',
   'public/manifest.json', 'public/sw.js', 'public/icon.svg', 'public/icon-192.png', 'public/icon-512.png'];
-const VERSION_FILE = path.join(ROOT, 'data', 'version.txt');
+const VERSION_FILE = path.join(ROOT, 'data', 'version.txt'); // 存已安装的 commit sha
+const BUNDLED_SHA = 'eac704b0adcbc94cf7a87fd43534ca47d56441fb'; // 打包时 main 的 SHA
+const GH_API = process.env.ACT_GH_API || `https://api.github.com/repos/${UPDATE_REPO}/commits/main`;
+const CDN_BASE = process.env.ACT_CDN_BASE || `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}`;
+const cdnUrl = sha => CDN_BASE.includes('{sha}') ? CDN_BASE.split('{sha}').join(sha) : `${CDN_BASE}@${sha}`;
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
 // 本地版本号（没有就按内置版本写）
-function localVersion() {
-  try { return fs.readFileSync(VERSION_FILE, 'utf8').trim() || BUNDLED_VERSION; }
-  catch (e) { fs.writeFileSync(VERSION_FILE, BUNDLED_VERSION); return BUNDLED_VERSION; }
+function localSha() {
+  try { return fs.readFileSync(VERSION_FILE, 'utf8').trim() || BUNDLED_SHA; }
+  catch (e) { fs.writeFileSync(VERSION_FILE, BUNDLED_SHA); return BUNDLED_SHA; }
 }
-localVersion();
+localSha();
+
+async function latestSha() {
+  const j = JSON.parse(await fetchUrl(GH_API));
+  if (!j || !j.sha) throw new Error('取不到最新版本');
+  return j.sha;
+}
+const remoteMeta = sha => fetchUrl(cdnUrl(sha) + '/version.json').then(t => JSON.parse(t));
 
 // ---------- 启动时自动备份（保留最近 30 份） ----------
 if (fs.existsSync(DB_PATH)) {
@@ -637,24 +650,25 @@ async function router(req, res) {
   // ---- 一键更新：检查（经理） ----
   if (seg[0] === 'update' && seg[1] === 'check' && method === 'GET' && isMgr) {
     try {
-      const remote = JSON.parse(await fetchUrl(UPDATE_BASE + '/version.json'));
-      return send(res, 200, { current: localVersion(), latest: remote.version || '0', hasUpdate: (remote.version || '0') !== localVersion() });
+      const sha = await latestSha();
+      const meta = await remoteMeta(sha);
+      return send(res, 200, { current: BUNDLED_VERSION, latest: meta.version || sha.slice(0, 7), hasUpdate: sha !== localSha() });
     } catch (e) { return send(res, 502, { error: '连不上更新服务器，稍后再试' }); }
   }
 
   // ---- 一键更新：下载并应用（经理） ----
   if (seg[0] === 'update' && seg[1] === 'apply' && method === 'POST' && isMgr) {
-    let remote;
-    try { remote = JSON.parse(await fetchUrl(UPDATE_BASE + '/version.json')); }
+    let sha, meta;
+    try { sha = await latestSha(); meta = await remoteMeta(sha); }
     catch (e) { return send(res, 502, { error: '连不上更新服务器，稍后再试' }); }
-    if ((remote.version || '0') === localVersion()) return send(res, 200, { ok: true, already: true });
-    const files = Array.isArray(remote.files) && remote.files.length ? remote.files : UPDATE_FILES;
+    if (sha === localSha()) return send(res, 200, { ok: true, already: true });
+    const files = Array.isArray(meta.files) && meta.files.length ? meta.files : UPDATE_FILES;
     try {
       // 先全部下载到内存，齐了再写盘
       const payload = [];
       for (const f of files) {
         if (f.includes('..') || path.isAbsolute(f)) throw new Error('非法文件路径');
-        const data = await fetchUrl(UPDATE_BASE + '/' + f, true);
+        const data = await fetchUrl(cdnUrl(sha) + '/' + f, true);
         if (!data.length) throw new Error('文件为空：' + f);
         payload.push([f, data]);
       }
@@ -663,9 +677,9 @@ async function router(req, res) {
         fs.mkdirSync(path.dirname(fp), { recursive: true });
         fs.writeFileSync(fp, data);
       }
-      fs.writeFileSync(VERSION_FILE, remote.version);
-      logOp(user.id, user.name, '一键更新', `版本 ${localVersion()} → ${remote.version}`);
-      send(res, 200, { ok: true, version: remote.version });
+      fs.writeFileSync(VERSION_FILE, sha);
+      logOp(user.id, user.name, '一键更新', `版本 ${BUNDLED_VERSION} → ${meta.version || sha.slice(0, 7)}`);
+      send(res, 200, { ok: true, version: meta.version || sha.slice(0, 7) });
       setTimeout(() => process.exit(99), 800); // 99 = 告诉启动脚本重启
     } catch (e) { return send(res, 502, { error: '更新包下载失败，没动你现在的文件：' + e.message }); }
     return;
