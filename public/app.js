@@ -112,36 +112,90 @@ async function doLogin() {
     const d = await api('/api/login', { method: 'POST', body: JSON.stringify({ phone, password }) });
     localStorage.setItem('act_token', d.token);
     ME = d.user;
+    api('/api/me').then(md => { ME._version = md.version; }).catch(() => {});
     location.hash = '#/home';
   } catch (e) { toast(e.message); }
 }
 window.doLogin = doLogin;
 
-/* ---------- 工作台 ---------- */
+/* ---------- 工作台（报表中心） ---------- */
+let repRange = 'today';
+const REP_NAMES = { today: '今日', week: '近7天', month: '近30天', year: '近12月' };
 async function vHome() {
   shell('home');
-  const s = await api('/api/stats');
-  ME._poolCount = s.pool;
-  shell('home');
-  const todo = await api('/api/customers?status=active').catch(() => ({ list: [] }));
-  const urgent = todo.list.filter(c => !c.in_pool).sort((a, b) => a.last_follow_at < b.last_follow_at ? -1 : 1).slice(0, 5);
+  api('/api/stats').then(s => { ME._poolCount = s.pool; shell('home'); }).catch(() => {});
   $('#view').innerHTML = `
-    <div class="page-title">今天案场怎么样</div>
-    <div class="stats">
-      <div class="stat"><div class="n">${s.todayVisit}</div><div class="l">今日来访（组）</div></div>
-      <div class="stat"><div class="n">${s.weekNew}</div><div class="l">7天新增</div></div>
-      <div class="stat"><div class="n">${s.mine}</div><div class="l">我在跟</div></div>
-      <div class="stat hot"><div class="n">${s.pool}</div><div class="l">公池待抢</div></div>
-      <div class="stat"><div class="n">${s.deals}</div><div class="l">已成交</div></div>
+    <div class="page-title">案场数据</div>
+    <div class="seg" id="rep-seg">
+      ${Object.entries(REP_NAMES).map(([k, v]) => `<button class="${k === repRange ? 'on' : ''}" onclick="setRepRange('${k}')">${v}</button>`).join('')}
     </div>
+    <div id="rep-body"><div class="empty"><div class="small">正在加载…</div></div></div>
     <div class="quick">
       <a href="#/register?t=visit"><span class="ic blue">${I.pen}</span>来访登记</a>
       <a href="#/register?t=call"><span class="ic green">${I.phone}</span>来电登记</a>
       <a href="#/pool"><span class="ic orange">${I.pool}</span>公池抢客</a>
-      <a href="#/customers"><span class="ic red">${I.users}</span>我的客户</a>
+      <a href="#/units"><span class="ic red">${I.chart}</span>销控</a>
+    </div>`;
+  loadReport();
+}
+function setRepRange(r) { repRange = r; vHome(); }
+window.setRepRange = setRepRange;
+
+async function loadReport() {
+  let d;
+  try { d = await api('/api/report?range=' + repRange); }
+  catch (e) { $('#rep-body').innerHTML = `<div class="empty"><div class="small">${esc(e.message)}</div></div>`; return; }
+  const s = d.summary;
+  const maxV = Math.max(1, ...d.trend.map(t => Math.max(t.visits, t.calls)));
+  const rangeName = REP_NAMES[repRange];
+  $('#rep-body').innerHTML = `
+    <div class="stats" style="grid-template-columns:repeat(4,1fr)">
+      <div class="stat"><div class="n">${s.visits}</div><div class="l">来访（组）</div></div>
+      <div class="stat"><div class="n">${s.calls}</div><div class="l">来电（个）</div></div>
+      <div class="stat"><div class="n">${s.newCustomers}</div><div class="l">新增客户</div></div>
+      <div class="stat"><div class="n">${s.deals}</div><div class="l">成交</div></div>
     </div>
-    <div class="section-title">该跟进了（按上次跟进时间排）</div>
-    <div id="urgent">${urgent.length ? urgent.map(c => customerRow(c, ME.role === 'manager')).join('') : '<div class="empty"><div class="big">都跟得挺紧</div><div class="small">手里的客户最近都联系过，继续保持</div></div>'}</div>`;
+    <div class="section-title">${rangeName}走势</div>
+    <div class="card pad">
+      ${d.trend.map(t => `
+        <div class="bar-row">
+          <div class="bar-label">${esc(t.label)}</div>
+          <div class="bar-track">
+            <div class="bar-fill v" style="width:${Math.round(t.visits / maxV * 100)}%"></div>
+            <div class="bar-fill c" style="width:${Math.round(t.calls / maxV * 100)}%"></div>
+          </div>
+          <div class="bar-val">${t.visits}访 ${t.calls}电</div>
+        </div>`).join('')}
+      <div class="bar-legend"><span><i class="dot v"></i>来访</span><span><i class="dot c"></i>来电</span></div>
+    </div>
+    ${ME.role === 'manager' && d.agents.length ? `
+    <div class="section-title">顾问排行</div>
+    <div class="card">
+      ${d.agents.map((a, i) => `
+        <div class="log-row"><b>${i + 1}. ${esc(a.name)}</b>
+          <span style="float:right;color:var(--muted);font-size:12.5px">${a.visits}访 · ${a.calls}电 · 新增${a.news} · 成交${a.deals}</span>
+        </div>`).join('')}
+    </div>` : ''}
+    <div class="section-title">来访明细（${d.visitDetails.length}）</div>
+    <div id="rep-visits">${d.visitDetails.length ? d.visitDetails.map(v => `
+      <div class="row" onclick="location.hash='#/customer/${v.customer_id}'" style="cursor:pointer">
+        <div class="avatar">${esc(v.name[0] || '客')}</div>
+        <div class="info">
+          <div class="name">${esc(v.name)}${v.age ? `<span style="font-size:12px;color:var(--muted);font-weight:400">${v.age}岁</span>` : ''}<span class="intent ${v.intent}">${v.intent}</span></div>
+          <div class="sub">第${v.visit_no}次到访 · ${esc(v.channel)} · ${esc(v.agent_name || '')} · ${esc(v.visited_at.slice(5, 16))}</div>
+        </div>
+        <div class="arrow">›</div>
+      </div>`).join('') : '<div class="empty"><div class="small">这段时间没有来访记录</div></div>'}</div>
+    <div class="section-title">来电明细（${d.callDetails.length}）</div>
+    <div>${d.callDetails.length ? d.callDetails.map(c => `
+      <div class="row" onclick="location.hash='#/customer/${c.id}'" style="cursor:pointer">
+        <div class="avatar">${esc(c.name[0] || '客')}</div>
+        <div class="info">
+          <div class="name">${esc(c.name)}${c.age ? `<span style="font-size:12px;color:var(--muted);font-weight:400">${c.age}岁</span>` : ''}<span class="intent ${c.intent}">${c.intent}</span></div>
+          <div class="sub">${esc(c.phone)} · ${esc(c.channel)} · ${esc(c.agent_name || '')} · ${esc(c.created_at.slice(5, 16))}</div>
+        </div>
+        <div class="arrow">›</div>
+      </div>`).join('') : '<div class="empty"><div class="small">这段时间没有来电记录</div></div>'}</div>`;
 }
 
 /* ---------- 登记（来访/来电） ---------- */
@@ -159,6 +213,7 @@ async function vRegister() {
     <div class="card pad"><div class="form">
       <div class="field"><label><span class="req">*</span>客户姓名</label><input id="rg-name" placeholder="比如：陈建国"></div>
       <div class="field"><label><span class="req">*</span>手机号</label><input id="rg-phone" inputmode="numeric" maxlength="11" placeholder="11 位手机号"></div>
+      <div class="field"><label>年龄<span style="color:var(--muted);font-weight:400">（选填）</span></label><input id="rg-age" inputmode="numeric" maxlength="3" placeholder="比如：35"></div>
       <div class="field"><label>渠道</label><select id="rg-channel">${CHANNELS.map(c => `<option ${c === (t === 'call' ? '电话咨询' : '自然到访') ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
       <div class="field"><label>意向等级</label><select id="rg-intent">
         <option value="A">A · 重点跟（近期能定）</option><option value="B">B · 有意向（在对比）</option>
@@ -175,21 +230,53 @@ window.setRegTab = setRegTab;
 async function doRegister() {
   const body = {
     name: $('#rg-name').value.trim(), phone: $('#rg-phone').value.trim(),
+    age: $('#rg-age').value.trim() ? Number($('#rg-age').value.trim()) : null,
     channel: $('#rg-channel').value, intent: $('#rg-intent').value,
     demand: $('#rg-demand').value.trim(), budget: $('#rg-budget').value.trim(),
     note: $('#rg-note').value.trim(), source_type: regTab === 'call' ? '来电' : '来访',
   };
   if (!body.name) return toast('客户姓名还没填');
   if (!/^1\d{10}$/.test(body.phone)) return toast('手机号得是 11 位数字');
+  if ($('#rg-age').value.trim() && !(body.age >= 1 && body.age <= 120)) return toast('年龄填得不对');
   try {
     const d = await api('/api/customers', { method: 'POST', body: JSON.stringify(body) });
     toast('登记成功，已归到你名下');
     location.hash = '#/customer/' + d.id;
   } catch (e) {
-    if (e.message.includes('已经登记')) { toast('这个手机号已经登记过了，不能重复录'); }
+    if (e.message.includes('已经登记')) {
+      // 撞单：给出来访登记转"记到访"
+      try {
+        const dup = await api('/api/customers?q=' + encodeURIComponent(body.phone));
+        const c = dup.list[0];
+        if (c && regTab === 'visit') {
+          openModal(`<h3>这个客户已经登记过了</h3><div class="form">
+            <div style="font-size:14px;line-height:1.8;margin-bottom:14px">
+              <b>${esc(c.name)}</b>（${esc(c.phone)}）<br>
+              <span style="color:var(--muted)">归属：${esc(c.owner_name || '—')} · 已到访过 ${await visitCount(c.id)} 次</span>
+            </div>
+            <div class="btn-row"><button class="btn ghost" onclick="closeModal()">算了</button><button class="btn primary" onclick="doVisit(${c.id}, ${c.owner_id === ME.id || ME.role === 'manager' ? 'true' : 'false'})">记为一次到访</button></div>
+          </div>`);
+          return;
+        }
+      } catch (e2) {}
+      toast('这个手机号已经登记过了，不能重复录');
+    }
     else toast(e.message);
   }
 }
+async function visitCount(id) {
+  try { const d = await api('/api/customers/' + id); return (d.customer.visits || []).length; }
+  catch (e) { return 0; }
+}
+async function doVisit(id, can) {
+  if (!can) { closeModal(); toast('这是别人的客户，到访记录找TA或经理记'); return; }
+  try {
+    const d = await api(`/api/customers/${id}/visits`, { method: 'POST', body: JSON.stringify({ note: '前台登记' }) });
+    closeModal(); toast(`已记为第 ${d.visit_no} 次到访`);
+    location.hash = '#/customer/' + id;
+  } catch (e) { toast(e.message); }
+}
+window.doVisit = doVisit;
 window.doRegister = doRegister;
 
 /* ---------- 客户列表 ---------- */
@@ -247,12 +334,13 @@ async function vCustomer(id) {
         <div style="font-size:13px;color:var(--muted);margin-top:2px">${esc(c.channel)} · ${esc(c.source_type)} · 归属：${esc(c.owner_name || '—')}</div></div>
       </div>
       <div class="kv"><div class="k">手机号</div><div class="v"><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div></div>
+      ${c.age ? `<div class="kv"><div class="k">年龄</div><div class="v">${c.age} 岁</div></div>` : ''}
       <div class="kv"><div class="k">需求</div><div class="v">${esc(c.demand || '—')}</div></div>
       <div class="kv"><div class="k">预算</div><div class="v">${esc(c.budget || '—')}</div></div>
       <div class="kv"><div class="k">备注</div><div class="v">${esc(c.note || '—')}</div></div>
       <div class="kv"><div class="k">最后跟进</div><div class="v">${esc(c.last_follow_at)}</div></div>
     </div>
-    ${canAct ? `<button class="btn primary" onclick="openFollowup(${c.id})">写跟进</button>` : ''}
+    ${canAct ? `<div class="btn-row"><button class="btn primary" onclick="openFollowup(${c.id})">写跟进</button><button class="btn ghost" onclick="openVisit(${c.id})">记到访</button></div>` : ''}
     ${c.in_pool && c.owner_id !== ME.id ? `<button class="btn warn" style="margin-top:10px" onclick="grab(${c.id})">抢到我名下</button>` : ''}
     ${ME.role === 'manager' ? `
     <div class="btn-row" style="margin-top:10px">
@@ -260,6 +348,13 @@ async function vCustomer(id) {
       <button class="btn ghost" onclick="openEdit(${c.id})">改资料</button>
       <button class="btn danger-ghost" onclick="delCustomer(${c.id})">删除</button>
     </div>` : ''}
+    <div class="section-title">到访记录（${(c.visits || []).length} 次）</div>
+    <div class="card pad">
+      ${(c.visits || []).length ? `<div class="timeline">${c.visits.map((v, i) => `
+        <div class="tl-item"><div class="t">${esc(v.visited_at)} · ${esc(v.user_name || '')} 接待</div>
+        <div class="c">第 ${(c.visits || []).length - i} 次到访${v.note ? ' · ' + esc(v.note) : ''}</div></div>`).join('')}</div>`
+        : '<div class="empty" style="padding:20px"><div class="small">还没有到访记录</div></div>'}
+    </div>
     <div class="section-title">跟进记录（${c.followups.length}）</div>
     <div class="card pad">
       ${c.followups.length ? `<div class="timeline">${c.followups.map(f => `
@@ -272,6 +367,20 @@ async function vCustomer(id) {
     ${c.phone_changes.length ? `<div class="section-title">号码变更留痕</div><div class="card">${c.phone_changes.map(p => `
       <div class="log-row"><span class="a">改号</span>${esc(p.created_at)} · ${esc(p.old_phone)} → ${esc(p.new_phone)} · 操作人 ${esc(p.op_name || '')}</div>`).join('')}</div>` : ''}`;
 }
+
+function openVisit(id) {
+  openModal(`<h3>记到访</h3><div class="form">
+    <div class="field"><label>备注<span style="color:var(--muted);font-weight:400">（选填）</span></label><input id="vi-note" placeholder="比如：带家人一起来的"></div>
+    <div class="btn-row"><button class="btn ghost" onclick="closeModal()">取消</button><button class="btn primary" onclick="doVisitSave(${id})">记为一次到访</button></div>
+  </div>`);
+}
+async function doVisitSave(id) {
+  try {
+    const d = await api(`/api/customers/${id}/visits`, { method: 'POST', body: JSON.stringify({ note: $('#vi-note').value.trim() }) });
+    closeModal(); toast(`已记为第 ${d.visit_no} 次到访`); vCustomer(id);
+  } catch (e) { toast(e.message); }
+}
+window.openVisit = openVisit; window.doVisitSave = doVisitSave;
 
 function openFollowup(id) {
   openModal(`<h3>写跟进</h3><div class="form">
@@ -319,6 +428,7 @@ function openEdit(id) {
     openModal(`<h3>改资料</h3><div class="form">
       <div class="field"><label>姓名</label><input id="ed-name" value="${esc(c.name)}"></div>
       <div class="field"><label>手机号（改了会自动留痕）</label><input id="ed-phone" value="${esc(c.phone)}" maxlength="11"></div>
+      <div class="field"><label>年龄</label><input id="ed-age" inputmode="numeric" maxlength="3" value="${c.age || ''}" placeholder="选填"></div>
       <div class="field"><label>意向</label><select id="ed-intent">${['A', 'B', 'C', 'D'].map(i => `<option value="${i}" ${c.intent === i ? 'selected' : ''}>${intentName[i]}</option>`).join('')}</select></div>
       <div class="field"><label>需求</label><input id="ed-demand" value="${esc(c.demand)}"></div>
       <div class="field"><label>预算</label><input id="ed-budget" value="${esc(c.budget)}"></div>
@@ -331,7 +441,7 @@ function openEdit(id) {
   });
 }
 async function doEdit(id) {
-  const body = { name: $('#ed-name').value.trim(), phone: $('#ed-phone').value.trim(), intent: $('#ed-intent').value, demand: $('#ed-demand').value.trim(), budget: $('#ed-budget').value.trim(), status: $('#ed-status').value };
+  const body = { name: $('#ed-name').value.trim(), phone: $('#ed-phone').value.trim(), age: $('#ed-age').value.trim() ? Number($('#ed-age').value.trim()) : null, intent: $('#ed-intent').value, demand: $('#ed-demand').value.trim(), budget: $('#ed-budget').value.trim(), status: $('#ed-status').value };
   try { await api('/api/customers/' + id, { method: 'PUT', body: JSON.stringify(body) }); closeModal(); toast('改好了'); vCustomer(id); }
   catch (e) { toast(e.message); }
 }
@@ -402,7 +512,8 @@ async function vMine() {
     <div class="card pad" style="font-size:13.5px;color:var(--muted);line-height:1.8">
       客户资料每天自动备份，不用你操心。<br>换了手机号、要转客户，去找销售经理操作。
     </div>`}
-    <button class="btn ghost" style="margin-top:18px" onclick="doLogout()">退出登录</button>`;
+    <button class="btn ghost" style="margin-top:18px" onclick="doLogout()">退出登录</button>
+    <div style="text-align:center;font-size:12px;color:var(--muted);margin-top:14px">案场通演示版 · v${esc(ME._version || '')}</div>`;
   async function doLogout() {
     try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
     localStorage.removeItem('act_token'); ME = null; location.hash = '#/login';
@@ -468,7 +579,7 @@ async function route() {
   const [path] = h.split('?');
   if (!token() && path !== '/login') { location.hash = '#/login'; return; }
   if (token() && !ME) {
-    try { ME = (await api('/api/me')).user; }
+    try { const md = await api('/api/me'); ME = md.user; ME._version = md.version; }
     catch (e) { location.hash = '#/login'; return; }
   }
   if (path.startsWith('/customer/')) { await vCustomer(path.split('/')[2]); window.scrollTo(0, 0); return; }
