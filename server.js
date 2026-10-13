@@ -19,7 +19,7 @@ const BACKUP_DIR = path.join(ROOT, 'backups');
 const POOL_DAYS = 15; // 15 天未跟进流入公池
 
 // ---------- 一键更新 ----------
-const BUNDLED_VERSION = '20261013.1'; // 发版时同步改 version.json
+const BUNDLED_VERSION = '20261013.2'; // 发版时同步改 version.json
 const UPDATE_BASE = process.env.ACT_UPDATE_BASE || 'https://cdn.jsdelivr.net/gh/leeugm-create/anchangtong@main';
 const UPDATE_FILES = ['server.js', 'public/index.html', 'public/styles.css', 'public/app.js',
   'public/manifest.json', 'public/sw.js', 'public/icon.svg', 'public/icon-192.png', 'public/icon-512.png'];
@@ -116,6 +116,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
 CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
 CREATE INDEX IF NOT EXISTS idx_followups_customer ON followups(customer_id);
+CREATE TABLE IF NOT EXISTS visit_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  note TEXT DEFAULT '',
+  visited_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_visits_customer ON visit_records(customer_id);
+CREATE INDEX IF NOT EXISTS idx_visits_date ON visit_records(visited_at);
 CREATE TABLE IF NOT EXISTS units (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   building TEXT NOT NULL,     -- 楼栋，如 1#
@@ -132,6 +141,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_units_no ON units(building, room);
 `);
 
 const sha256 = s => crypto.createHash('sha256').update(String(s)).digest('hex');
+// 老库升级：客户加年龄
+try { db.exec('ALTER TABLE customers ADD COLUMN age INTEGER'); } catch (e) { /* 列已存在 */ }
 const now = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`; };
 const poolCutoff = () => { const d = new Date(Date.now() - POOL_DAYS * 864e5); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`; };
 
@@ -185,10 +196,17 @@ if (db.prepare('SELECT COUNT(*) c FROM users').get().c === 0) {
     ['蒋涛', '13980002020', '网络咨询', 'B', '118㎡三房', '80万左右', '贝壳上看到的，约了周末来看', '来电', a1, 4, 3],
     ['沈佳', '13980003030', '电话咨询', 'B', '132㎡四房', '100万以内', '问了学校划片，孩子明年上小学', '来电', a2, 9, 7],
   ];
-  const insC = db.prepare(`INSERT INTO customers (name,phone,channel,intent,demand,budget,note,source_type,owner_id,created_at,last_follow_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  const insC = db.prepare(`INSERT INTO customers (name,phone,channel,intent,demand,budget,note,source_type,owner_id,age,created_at,last_follow_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
   const insF = db.prepare(`INSERT INTO followups (customer_id,user_id,content,next_plan,created_at) VALUES (?,?,?,?,?)`);
+  const insV = db.prepare(`INSERT INTO visit_records (customer_id,user_id,note,visited_at) VALUES (?,?,?,?)`);
+  const ages = [38, 32, 45, 29, 41, 36, 52, 30, 34, 48, 33, 28];
+  let si = 0;
   for (const s of seeds) {
-    const id = insC.run(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], daysAgo(s[9]), daysAgo(s[10])).lastInsertRowid;
+    const id = insC.run(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], ages[si % ages.length], daysAgo(s[9]), daysAgo(s[10])).lastInsertRowid;
+    si++;
+    // 首访记一条到访；来得早的再补一条
+    if (s[7] === '来访') insV.run(id, s[8], '首访', daysAgo(s[9]));
+    if (s[9] >= 15) insV.run(id, s[8], '再次到访', daysAgo(Math.max(1, s[10] - 2)));
     if (s[10] <= 12) {
       insF.run(id, s[8], `首访接待：${s[6]}`, '三天内再约一次', daysAgo(s[9]));
       if (s[10] >= 3) insF.run(id, s[8], '电话回访：客户还在对比，说下周给准信', '下周三前再跟一次', daysAgo(s[10]));
@@ -244,7 +262,7 @@ function getUser(req) {
   return db.prepare('SELECT id, name, phone, role FROM users WHERE id=? AND active=1').get(s.user_id) || null;
 }
 const customerRow = r => r ? {
-  id: r.id, name: r.name, phone: r.phone, channel: r.channel, intent: r.intent,
+  id: r.id, name: r.name, phone: r.phone, age: r.age || null, channel: r.channel, intent: r.intent,
   demand: r.demand, budget: r.budget, note: r.note, source_type: r.source_type,
   owner_id: r.owner_id, owner_name: r.owner_name, status: r.status,
   in_pool: r.status === 'active' && r.last_follow_at < poolCutoff(),
@@ -293,7 +311,7 @@ async function router(req, res) {
   const isMgr = user.role === 'manager';
 
   // ---- 我的信息 ----
-  if (seg[0] === 'me') return send(res, 200, { user });
+  if (seg[0] === 'me') return send(res, 200, { user, version: BUNDLED_VERSION });
 
   // ---- 工作台统计 ----
   if (seg[0] === 'stats') {
@@ -334,11 +352,16 @@ async function router(req, res) {
     if (!name || !/^1\d{10}$/.test(phone)) return send(res, 400, { error: '姓名和 11 位手机号都要填对' });
     const dup = db.prepare(`SELECT ${CUST_SELECT} WHERE c.phone=? AND c.status!='deleted'`).get(phone);
     if (dup) return send(res, 409, { error: '这个手机号已经登记过了', customer: customerRow(dup) });
-    const r = db.prepare(`INSERT INTO customers (name,phone,channel,intent,demand,budget,note,source_type,owner_id)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(name, phone, b.channel || '自然到访', b.intent || 'C',
-      String(b.demand || ''), String(b.budget || ''), String(b.note || ''), b.source_type || '来访', user.id);
+    const age = b.age ? Math.max(0, Math.min(120, Number(b.age) || 0)) : null;
+    const r = db.prepare(`INSERT INTO customers (name,phone,channel,intent,demand,budget,note,source_type,owner_id,age)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(name, phone, b.channel || '自然到访', b.intent || 'C',
+      String(b.demand || ''), String(b.budget || ''), String(b.note || ''), b.source_type || '来访', user.id, age);
+    const newId = r.lastInsertRowid;
+    if ((b.source_type || '来访') === '来访') {
+      db.prepare('INSERT INTO visit_records (customer_id, user_id, note) VALUES (?,?,?)').run(newId, user.id, '首访登记');
+    }
     logOp(user.id, user.name, b.source_type === '来电' ? '来电登记' : '来访登记', `${name} ${phone}`);
-    return send(res, 200, { id: r.lastInsertRowid });
+    return send(res, 200, { id: newId });
   }
 
   const cid = seg[1] ? Number(seg[1]) : null;
@@ -349,6 +372,7 @@ async function router(req, res) {
     if (!r || r.status === 'deleted' || (!isMgr && r.owner_id !== user.id)) return send(res, 404, { error: '找不到这个客户' });
     const c = customerRow(r);
     c.followups = db.prepare(`SELECT f.*, u.name AS user_name FROM followups f LEFT JOIN users u ON u.id=f.user_id WHERE f.customer_id=? ORDER BY f.created_at DESC`).all(cid);
+    c.visits = db.prepare(`SELECT v.*, u.name AS user_name FROM visit_records v LEFT JOIN users u ON u.id=v.user_id WHERE v.customer_id=? ORDER BY v.visited_at DESC`).all(cid);
     c.transfers = db.prepare(`SELECT t.*, a.name AS from_name, b.name AS to_name, o.name AS op_name FROM transfers t LEFT JOIN users a ON a.id=t.from_user_id LEFT JOIN users b ON b.id=t.to_user_id LEFT JOIN users o ON o.id=t.operator_id WHERE t.customer_id=? ORDER BY t.created_at DESC`).all(cid);
     c.phone_changes = db.prepare(`SELECT p.*, o.name AS op_name FROM phone_changes p LEFT JOIN users o ON o.id=p.operator_id WHERE p.customer_id=? ORDER BY p.created_at DESC`).all(cid);
     return send(res, 200, { customer: c });
@@ -390,9 +414,9 @@ async function router(req, res) {
         .run(cid, r.phone, b.phone, user.id);
       logOp(user.id, user.name, '改号码', `${r.name}：${r.phone} → ${b.phone}`);
     }
-    db.prepare(`UPDATE customers SET name=?, phone=?, channel=?, intent=?, demand=?, budget=?, note=?, status=?,
+    db.prepare(`UPDATE customers SET name=?, phone=?, age=?, channel=?, intent=?, demand=?, budget=?, note=?, status=?,
       updated_at=datetime('now','localtime') WHERE id=?`)
-      .run(b.name || r.name, b.phone || r.phone, b.channel || r.channel, b.intent || r.intent,
+      .run(b.name || r.name, b.phone || r.phone, b.age !== undefined ? b.age : r.age, b.channel || r.channel, b.intent || r.intent,
         b.demand ?? r.demand, b.budget ?? r.budget, b.note ?? r.note, b.status || r.status, cid);
     logOp(user.id, user.name, '编辑客户', `${r.name} 资料已更新`);
     return send(res, 200, { ok: true });
@@ -426,7 +450,94 @@ async function router(req, res) {
     return send(res, 200, { ok: true });
   }
 
-  // ---- 经理：顾问列表 ----
+  // ---- 记到访（老客户又来了） ----
+  if (seg[0] === 'customers' && seg.length === 3 && seg[2] === 'visits' && method === 'POST' && cid) {
+    const r = db.prepare('SELECT * FROM customers WHERE id=?').get(cid);
+    if (!r || r.status === 'deleted' || (!isMgr && r.owner_id !== user.id)) return send(res, 404, { error: '找不到这个客户' });
+    const b = await readBody(req);
+    const cnt = db.prepare('SELECT COUNT(*) c FROM visit_records WHERE customer_id=?').get(cid).c;
+    db.prepare('INSERT INTO visit_records (customer_id, user_id, note) VALUES (?,?,?)').run(cid, user.id, String(b.note || ''));
+    db.prepare(`UPDATE customers SET last_follow_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?`).run(cid);
+    logOp(user.id, user.name, '记到访', `${r.name} 第${cnt + 1}次到访`);
+    return send(res, 200, { ok: true, visit_no: cnt + 1 });
+  }
+
+  // ---- 报表：今日/周/月/年 ----
+  if (seg[0] === 'report' && method === 'GET') {
+    const range = ['today', 'week', 'month', 'year'].includes(url.searchParams.get('range')) ? url.searchParams.get('range') : 'today';
+    const ref = url.searchParams.get('date') || now().slice(0, 10);
+    const pad = n => String(n).padStart(2, '0');
+    const fmtD = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const refD = new Date(ref + 'T12:00:00');
+    let from, to = fmtD(refD), group = 'day';
+    if (range === 'today') from = to;
+    else if (range === 'week') from = fmtD(new Date(refD.getTime() - 6 * 864e5));
+    else if (range === 'month') from = fmtD(new Date(refD.getTime() - 29 * 864e5));
+    else { group = 'month'; const m = new Date(refD.getFullYear(), refD.getMonth() - 11, 1); from = fmtD(m); }
+    const dateCond = alias => `substr(${alias},1,10) BETWEEN '${from}' AND '${to}'`;
+    const scopeC = isMgr ? '' : `AND c.owner_id=${user.id}`;
+    const scopeV = isMgr ? '' : `AND (vr.user_id=${user.id} OR c.owner_id=${user.id})`;
+
+    const visits = db.prepare(`
+      SELECT vr.id, vr.visited_at, vr.note, c.id AS customer_id, c.name, c.age, c.phone, c.channel, c.intent,
+             u.name AS agent_name,
+             (SELECT COUNT(*) FROM visit_records v2 WHERE v2.customer_id=vr.customer_id AND v2.visited_at <= vr.visited_at) AS visit_no
+      FROM visit_records vr JOIN customers c ON c.id=vr.customer_id LEFT JOIN users u ON u.id=vr.user_id
+      WHERE c.status != 'deleted' AND ${dateCond('vr.visited_at')} ${scopeV}
+      ORDER BY vr.visited_at DESC LIMIT 200`).all();
+    const calls = db.prepare(`
+      SELECT c.id, c.name, c.age, c.phone, c.channel, c.intent, c.created_at, u.name AS agent_name
+      FROM customers c LEFT JOIN users u ON u.id=c.owner_id
+      WHERE c.status != 'deleted' AND c.source_type='来电' AND ${dateCond('c.created_at')} ${scopeC}
+      ORDER BY c.created_at DESC LIMIT 200`).all();
+    const news = db.prepare(`
+      SELECT c.id, c.name, c.phone, c.channel, c.source_type, c.created_at, u.name AS agent_name
+      FROM customers c LEFT JOIN users u ON u.id=c.owner_id
+      WHERE c.status != 'deleted' AND ${dateCond('c.created_at')} ${scopeC}
+      ORDER BY c.created_at DESC LIMIT 200`).all();
+    const deals = db.prepare(`
+      SELECT c.id, c.name, c.phone, c.updated_at, u.name AS agent_name
+      FROM customers c LEFT JOIN users u ON u.id=c.owner_id
+      WHERE c.status='deal' AND ${dateCond('c.updated_at')} ${scopeC}
+      ORDER BY c.updated_at DESC LIMIT 200`).all();
+
+    // 趋势桶
+    const buckets = [];
+    if (group === 'day') {
+      for (let t = new Date(from + 'T12:00:00'); fmtD(t) <= to; t = new Date(t.getTime() + 864e5)) {
+        const k = fmtD(t);
+        buckets.push({ label: k.slice(5), key: k, visits: 0, calls: 0 });
+      }
+      const idx = Object.fromEntries(buckets.map((b, i) => [b.key, i]));
+      visits.forEach(v => { const i = idx[v.visited_at.slice(0, 10)]; if (i != null) buckets[i].visits++; });
+      calls.forEach(c => { const i = idx[c.created_at.slice(0, 10)]; if (i != null) buckets[i].calls++; });
+    } else {
+      const start = new Date(from + 'T12:00:00');
+      for (let i = 0; i < 12; i++) {
+        const m = new Date(start.getFullYear(), start.getMonth() + i, 1);
+        const k = `${m.getFullYear()}-${pad(m.getMonth() + 1)}`;
+        buckets.push({ label: k.slice(5) + '月', key: k, visits: 0, calls: 0 });
+      }
+      const idx = Object.fromEntries(buckets.map((b, i) => [b.key, i]));
+      visits.forEach(v => { const i = idx[v.visited_at.slice(0, 7)]; if (i != null) buckets[i].visits++; });
+      calls.forEach(c => { const i = idx[c.created_at.slice(0, 7)]; if (i != null) buckets[i].calls++; });
+    }
+    // 顾问排行
+    const ag = {};
+    const bump = (name, k) => { if (!name) return; ag[name] = ag[name] || { name, visits: 0, calls: 0, news: 0, deals: 0 }; ag[name][k]++; };
+    visits.forEach(v => bump(v.agent_name, 'visits'));
+    calls.forEach(c => bump(c.agent_name, 'calls'));
+    news.forEach(c => bump(c.agent_name, 'news'));
+    deals.forEach(c => bump(c.agent_name, 'deals'));
+    const agents = Object.values(ag).sort((a, b) => (b.visits + b.calls) - (a.visits + a.calls));
+
+    return send(res, 200, {
+      range, from, to,
+      summary: { visits: visits.length > 0 ? db.prepare(`SELECT COUNT(*) c FROM visit_records vr JOIN customers c ON c.id=vr.customer_id WHERE c.status!='deleted' AND ${dateCond('vr.visited_at')} ${scopeV}`).get().c : 0, calls: calls.length, newCustomers: news.length, deals: deals.length },
+      trend: buckets, agents,
+      visitDetails: visits.slice(0, 100), callDetails: calls.slice(0, 100),
+    });
+  }
   if (seg[0] === 'users' && method === 'GET' && isMgr) {
     const list = db.prepare(`SELECT u.id, u.name, u.phone, u.role,
       (SELECT COUNT(*) FROM customers c WHERE c.owner_id=u.id AND c.status='active') AS active_count
