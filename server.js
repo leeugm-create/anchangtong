@@ -142,11 +142,11 @@ function logOp(operatorId, operatorName, action, detail) {
 
 // 拉取更新文件（跟随跳转，30秒超时）
 function fetchUrl(url, binary) {
-  const https = require('node:https');
+  const lib = url.startsWith('https:') ? require('node:https') : require('node:http');
   return new Promise((resolve, reject) => {
     const get = (u, n) => {
       if (n > 5) return reject(new Error('跳转太多了'));
-      https.get(u, { timeout: 30000, headers: { 'User-Agent': 'anchangtong-updater' } }, res => {
+      lib.get(u, { timeout: 30000, headers: { 'User-Agent': 'anchangtong-updater' } }, res => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           res.resume();
           return get(new URL(res.headers.location, u).toString(), n + 1);
