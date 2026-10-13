@@ -1,5 +1,7 @@
-/* 案场通 Service Worker：缓存 App 外壳，断网也能打开界面（数据走网络） */
-const CACHE = 'anchangtong-v1';
+/* 案场通 Service Worker
+   策略：网络优先——有网永远拿最新代码，没网才用缓存。
+   （之前缓存优先导致刷新看不到新版，已改） */
+const CACHE = 'anchangtong-v2';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -12,10 +14,10 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (url.pathname.startsWith('/api/')) return; // 接口不缓存
   e.respondWith(
-    caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
+    fetch(e.request).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(e.request, copy));
       return res;
-    }).catch(() => caches.match('/index.html')))
+    }).catch(() => caches.match(e.request).then(hit => hit || caches.match('/index.html')))
   );
 });
