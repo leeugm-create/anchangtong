@@ -26,7 +26,7 @@ const UPDATE_REPO = 'leeugm-create/anchangtong';
 const UPDATE_FILES = ['server.js', 'public/index.html', 'public/styles.css', 'public/app.js',
   'public/manifest.json', 'public/sw.js', 'public/icon.svg', 'public/icon-192.png', 'public/icon-512.png'];
 const VERSION_FILE = path.join(ROOT, 'data', 'version.txt'); // 存已安装的 commit sha
-const BUNDLED_SHA = 'eac704b0adcbc94cf7a87fd43534ca47d56441fb'; // 打包时 main 的 SHA
+const BUNDLED_SHA = '5c92a0cd86075345c279da68d2eb86f55c91060c'; // 打包时 main 的 SHA
 const GH_API = process.env.ACT_GH_API || `https://api.github.com/repos/${UPDATE_REPO}/commits/main`;
 const CDN_BASE = process.env.ACT_CDN_BASE || `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}`;
 const cdnUrl = sha => CDN_BASE.includes('{sha}') ? CDN_BASE.split('{sha}').join(sha) : `${CDN_BASE}@${sha}`;
